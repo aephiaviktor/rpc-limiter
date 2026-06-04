@@ -1,0 +1,38 @@
+{
+  "name": "rpc_limiter",
+  "version": "0.1.0",
+  "description": "Cross-process RPC rate limiter + exclusive-window scheduler for Solana bots sharing one Helius API key.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start:cli": "ts-node src/cli.ts"
+  },
+  "keywords": [
+    "solana",
+    "rpc",
+    "rate-limit",
+    "helius",
+    "electron",
+    "cross-process"
+  ],
+  "author": "Viktor / AEP",
+  "license": "ISC",
+  "dependencies": {
+    "proper-lockfile": "^4.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "@types/proper-lockfile": "^4.1.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2",
+    "vitest": "^2.1.8"
+  }
+}
