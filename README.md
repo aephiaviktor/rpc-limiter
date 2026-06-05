@@ -64,6 +64,11 @@ const limiter = new RpcLimiter({
 // Before every RPC:
 await limiter.wait('rpc:shared', {
   label: 'getMultipleAccounts',
+  metrics: {
+    app: 'GM Market Bot',
+    profile: 'default',
+    method: 'getMultipleAccounts',
+  },
   deadlineMs: 5000, // abort if slot can't be reserved in time
 });
 const res = await fetch(rpcUrl, { /* ... */ });
@@ -113,6 +118,8 @@ prevent a misbehaving fleet-rental loop from starving the other 7 bots.
 ```bash
 rpc-limiter status         # full state.json
 rpc-limiter dump           # status + bucket summary + exclusive info
+rpc-limiter metrics        # last 24h vs previous 7-day average
+rpc-limiter metrics --json # machine-readable comparison report
 rpc-limiter set k=v ...    # dotted-key=value pairs
 rpc-limiter reset          # restore defaults
 rpc-limiter path           # print resolved paths
@@ -122,6 +129,8 @@ rpc-limiter path           # print resolved paths
 
 - `~/.rpc_limiter/rpc.lock` — `proper-lockfile` lockfile, 5s stale timeout.
 - `~/.rpc_limiter/state.json` — atomic writes via tmp+rename, version 1 schema.
+- `~/.rpc_limiter/metrics.lock` — separate lock for metrics writes.
+- `~/.rpc_limiter/metrics.json` — rolling per-method/per-source counters.
 
 Per-call flow:
 
@@ -133,9 +142,38 @@ Per-call flow:
 5. Release lock.
 6. Sleep until `grantMs` (or fail with `DeadlineExceededError`).
 
-The lock is held only for the few milliseconds of state read/write.
+The scheduler lock is held only for the few milliseconds of state read/write.
 The sleep happens outside the lock, so 8 bots can hold reserved slots
 in flight simultaneously.
+
+## Metrics
+
+`wait()` accepts optional structured metrics labels:
+
+```ts
+await limiter.wait('rpc:shared', {
+  label: 'Connection.getParsedTokenAccountsByOwner()',
+  metrics: {
+    app: 'LM Market Bot',
+    profile: 'MUD',
+    method: 'getParsedTokenAccountsByOwner',
+  },
+});
+```
+
+The limiter normalizes common Solana/Helius methods, so
+`getParsedTokenAccountsByOwner` and `getTokenAccountsByOwner` both roll up as
+`GET_TOKEN_ACCOUNTS_BY_OWNER`; `sendRawTransaction` rolls up as
+`SEND_TRANSACTION`.
+
+Metrics are stored separately from scheduler state and use tiered retention:
+
+- minute buckets: 48 hours
+- hour buckets: 30 days
+- day buckets: 180 days
+
+Use `rpc-limiter metrics` to compare the last 24h against the average day over
+the previous seven UTC days, including the largest source deltas by app/profile.
 
 ## Per-bot settings
 

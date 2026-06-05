@@ -9,10 +9,13 @@ import {
 } from './state';
 import { RpcLimiterState, ExclusiveState, STATE_VERSION } from './types';
 import { ownerId } from './owner';
+import { recordRpcMetric, RpcMetricLabels } from './metrics';
 
 export interface WaitOptions {
   /** Opaque label for logging/debug, e.g. 'getMultipleAccounts'. */
   label?: string;
+  /** Structured labels for shared metrics. */
+  metrics?: RpcMetricLabels;
   /**
    * If set, the wait rejects with DeadlineExceededError if a slot cannot be
    * reserved before this wall-clock time. The bot should set this to the
@@ -103,14 +106,18 @@ export class RpcLimiter {
     const maxWait = opts.maxWaitMs;
 
     while (true) {
+      const requestedAtMs = this.now();
       const grantMs = await this.withLock(() => this.reserveSlot(bucketName));
       const now = this.now();
       const sleepMs = grantMs - now;
+      const totalWaitMs = Math.max(0, grantMs - requestedAtMs);
 
       if (sleepMs <= 0) {
+        this.recordWaitMetric(bucketName, opts, totalWaitMs, false);
         return;
       }
       if (maxWait !== undefined && sleepMs > maxWait) {
+        this.recordWaitMetric(bucketName, opts, totalWaitMs, true);
         throw new WaitTimeoutError(
           `wait('${bucketName}', label='${opts.label ?? ''}') would sleep ${sleepMs}ms > maxWaitMs ${maxWait}ms`
         );
@@ -118,12 +125,14 @@ export class RpcLimiter {
       if (deadline !== undefined) {
         const remaining = deadline - now;
         if (sleepMs > remaining) {
+          this.recordWaitMetric(bucketName, opts, totalWaitMs, true);
           throw new DeadlineExceededError(
             `wait('${bucketName}', label='${opts.label ?? ''}') would sleep ${sleepMs}ms past deadlineMs ${deadline}ms`
           );
         }
       }
       await this.sleep(sleepMs);
+      this.recordWaitMetric(bucketName, opts, totalWaitMs, false);
       return;
     }
   }
@@ -349,6 +358,32 @@ export class RpcLimiter {
         // best-effort
       }
     }
+  }
+
+  private recordWaitMetric(
+    bucketName: string,
+    opts: WaitOptions,
+    waitMs: number,
+    rejected: boolean,
+  ): void {
+    const labels = opts.metrics;
+    const method = labels?.method ?? opts.label ?? bucketName;
+
+    void recordRpcMetric(
+      this.paths,
+      {
+        app: labels?.app,
+        profile: labels?.profile,
+        method,
+        bucket: bucketName,
+        waitMs,
+        rejected,
+      },
+      this.now(),
+      this.lockOptions,
+    ).catch(() => {
+      // Metrics must never block or fail RPC scheduling.
+    });
   }
 }
 

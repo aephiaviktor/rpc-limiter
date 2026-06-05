@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.STATE_VERSION = exports.ownerId = exports.resolvePaths = exports.WaitTimeoutError = exports.DeadlineExceededError = exports.RpcLimiter = void 0;
+exports.normalizeRpcMethod = exports.formatMetricsComparison = exports.buildMetricsComparison = exports.readMetrics = exports.recordRpcMetric = exports.DEFAULT_METRICS_RETENTION = exports.METRICS_VERSION = exports.STATE_VERSION = exports.ownerId = exports.resolvePaths = exports.WaitTimeoutError = exports.DeadlineExceededError = exports.RpcLimiter = void 0;
 var limiter_1 = require("./limiter");
 Object.defineProperty(exports, "RpcLimiter", { enumerable: true, get: function () { return limiter_1.RpcLimiter; } });
 var limiter_2 = require("./limiter");
@@ -12,4 +12,12 @@ var owner_1 = require("./owner");
 Object.defineProperty(exports, "ownerId", { enumerable: true, get: function () { return owner_1.ownerId; } });
 var types_1 = require("./types");
 Object.defineProperty(exports, "STATE_VERSION", { enumerable: true, get: function () { return types_1.STATE_VERSION; } });
+var metrics_1 = require("./metrics");
+Object.defineProperty(exports, "METRICS_VERSION", { enumerable: true, get: function () { return metrics_1.METRICS_VERSION; } });
+Object.defineProperty(exports, "DEFAULT_METRICS_RETENTION", { enumerable: true, get: function () { return metrics_1.DEFAULT_METRICS_RETENTION; } });
+Object.defineProperty(exports, "recordRpcMetric", { enumerable: true, get: function () { return metrics_1.recordRpcMetric; } });
+Object.defineProperty(exports, "readMetrics", { enumerable: true, get: function () { return metrics_1.readMetrics; } });
+Object.defineProperty(exports, "buildMetricsComparison", { enumerable: true, get: function () { return metrics_1.buildMetricsComparison; } });
+Object.defineProperty(exports, "formatMetricsComparison", { enumerable: true, get: function () { return metrics_1.formatMetricsComparison; } });
+Object.defineProperty(exports, "normalizeRpcMethod", { enumerable: true, get: function () { return metrics_1.normalizeRpcMethod; } });
 //# sourceMappingURL=index.js.map

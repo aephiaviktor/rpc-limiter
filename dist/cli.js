@@ -37,6 +37,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const fs = __importStar(require("fs"));
 const paths_1 = require("./paths");
 const types_1 = require("./types");
+const metrics_1 = require("./metrics");
 const HELP = `rpc-limiter — cross-process RPC rate limiter for shared Helius keys
 
 Usage:
@@ -45,6 +46,7 @@ Usage:
   rpc-limiter set <key>=<value> [<key>=<value> ...]
   rpc-limiter reset
   rpc-limiter path
+  rpc-limiter metrics [--json] [--limit=<n>]
 
 Keys for 'set':
   enabled=true|false
@@ -61,6 +63,7 @@ Examples:
   rpc-limiter set apiKey=61b4b51d-... rpcBaseUrl=https://mainnet.helius-rpc.com
   rpc-limiter set buckets.rpc:shared.intervalMs=200
   rpc-limiter status
+  rpc-limiter metrics
 `;
 function readStateFile(file) {
     if (!fs.existsSync(file)) {
@@ -119,6 +122,15 @@ function main(argv) {
     if (cmd === 'status') {
         const state = readStateFile(paths.stateFile);
         process.stdout.write(JSON.stringify(state, null, 2) + '\n');
+        return 0;
+    }
+    if (cmd === 'metrics') {
+        const json = argv.includes('--json');
+        const limitArg = argv.find((arg) => arg.startsWith('--limit='));
+        const limit = limitArg ? Math.max(1, Number(limitArg.slice('--limit='.length)) || 20) : 20;
+        const metrics = (0, metrics_1.readMetrics)(paths.metricsFile);
+        const report = (0, metrics_1.buildMetricsComparison)(metrics, Date.now(), limit);
+        process.stdout.write(json ? JSON.stringify(report, null, 2) + '\n' : (0, metrics_1.formatMetricsComparison)(report));
         return 0;
     }
     if (cmd === 'dump') {

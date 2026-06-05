@@ -1,9 +1,12 @@
 import * as lockfile from 'proper-lockfile';
 import { RpcLimiterPaths } from './paths';
 import { RpcLimiterState, ExclusiveState, STATE_VERSION } from './types';
+import { RpcMetricLabels } from './metrics';
 export interface WaitOptions {
     /** Opaque label for logging/debug, e.g. 'getMultipleAccounts'. */
     label?: string;
+    /** Structured labels for shared metrics. */
+    metrics?: RpcMetricLabels;
     /**
      * If set, the wait rejects with DeadlineExceededError if a slot cannot be
      * reserved before this wall-clock time. The bot should set this to the
@@ -110,6 +113,7 @@ export declare class RpcLimiter {
     private makeExclusive;
     private applyConfigOverride;
     private withLock;
+    private recordWaitMetric;
 }
 export declare class DeadlineExceededError extends Error {
     readonly kind = "deadline-exceeded";

@@ -11,6 +11,8 @@ export interface RpcLimiterPaths {
     root: string;
     lockfile: string;
     stateFile: string;
+    metricsLockfile: string;
+    metricsFile: string;
 }
 export declare function resolvePaths(homeOverride?: string): RpcLimiterPaths;
 //# sourceMappingURL=paths.d.ts.map

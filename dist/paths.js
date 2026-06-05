@@ -49,6 +49,8 @@ function resolvePaths(homeOverride) {
         root,
         lockfile: path.join(root, 'rpc.lock'),
         stateFile: path.join(root, 'state.json'),
+        metricsLockfile: path.join(root, 'metrics.lock'),
+        metricsFile: path.join(root, 'metrics.json'),
     };
 }
 //# sourceMappingURL=paths.js.map

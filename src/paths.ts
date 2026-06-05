@@ -15,6 +15,8 @@ export interface RpcLimiterPaths {
   root: string;
   lockfile: string;
   stateFile: string;
+  metricsLockfile: string;
+  metricsFile: string;
 }
 
 export function resolvePaths(homeOverride?: string): RpcLimiterPaths {
@@ -31,5 +33,7 @@ export function resolvePaths(homeOverride?: string): RpcLimiterPaths {
     root,
     lockfile: path.join(root, 'rpc.lock'),
     stateFile: path.join(root, 'state.json'),
+    metricsLockfile: path.join(root, 'metrics.lock'),
+    metricsFile: path.join(root, 'metrics.json'),
   };
 }
