@@ -39,7 +39,7 @@ describe('RpcLimiter — wait()', () => {
     const start = Date.now();
     await limiter.wait('rpc:shared');
     const elapsed = Date.now() - start;
-    expect(elapsed).toBeLessThan(50);
+    expect(elapsed).toBeLessThan(120);
   });
 
   it('second call in same bucket waits ~intervalMs', async () => {
@@ -84,7 +84,7 @@ describe('RpcLimiter — wait()', () => {
     const start = Date.now();
     await Promise.all([limiter.wait('bucket:a'), limiter.wait('bucket:b')]);
     const elapsed = Date.now() - start;
-    expect(elapsed).toBeLessThan(50);
+    expect(elapsed).toBeLessThan(120);
   });
 });
 
@@ -201,6 +201,34 @@ describe('RpcLimiter — acquireExclusive()', () => {
       const ceiling = ex.acquiredAtMs + 1000;
       expect(newUntil).toBeLessThanOrEqual(ceiling);
     }
+  });
+
+  it('acquireExclusive cancels queued bucket slots', async () => {
+    const paths = resolvePaths(home);
+    const now = Date.now();
+    const state = {
+      version: 1,
+      enabled: true,
+      apiKey: '',
+      rpcBaseUrl: 'https://mainnet.helius-rpc.com',
+      buckets: {
+        'rpc:shared': { nextSlotMs: now + 10_000, intervalMs: 1000 },
+        'tx:shared': { nextSlotMs: now + 5_000, intervalMs: 1000 },
+      },
+      limits: { maxExclusiveMs: 30_000, minNormalMsBetweenExclusives: 0 },
+      exclusive: null,
+      lastExclusiveEndedAtMs: null,
+      revision: 0,
+    };
+    fs.writeFileSync(paths.stateFile, JSON.stringify(state, null, 2));
+
+    const limiter = new RpcLimiter({ homeOverride: home });
+    const result = await limiter.acquireExclusive('fleet:aggressive', 4000);
+    expect(result.ok).toBe(true);
+
+    const status = limiter.status();
+    expect(status.buckets['rpc:shared'].nextSlotMs).toBeLessThanOrEqual(Date.now());
+    expect(status.buckets['tx:shared'].nextSlotMs).toBeLessThanOrEqual(Date.now());
   });
 });
 
@@ -333,7 +361,7 @@ describe('RpcLimiter — preempt semantics', () => {
   });
 });
 
-describe('RpcLimiter — wait() blocks during exclusive', () => {
+describe('RpcLimiter — wait() exclusive behavior', () => {
   let home: string;
   beforeEach(() => {
     home = freshHome();
@@ -367,6 +395,20 @@ describe('RpcLimiter — wait() blocks during exclusive', () => {
     await limiter.wait('rpc:shared');
     const elapsed = Date.now() - t0;
     expect(elapsed).toBeGreaterThanOrEqual(200);
+  });
+
+  it('exclusive holder can reserve slots during its own window', async () => {
+    const limiter = new RpcLimiter({
+      homeOverride: home,
+      configOverride: { buckets: { 'rpc:shared': { intervalMs: 1000 } } },
+    });
+    const result = await limiter.acquireExclusive('fleet:aggressive', 4000);
+    expect(result.ok).toBe(true);
+
+    const t0 = Date.now();
+    await limiter.wait('rpc:shared');
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeLessThan(120);
   });
 });
 

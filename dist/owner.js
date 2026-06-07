@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ownerId = ownerId;
 const crypto = __importStar(require("crypto"));
+const PROCESS_OWNER_ID = `${process.pid}:${crypto.randomBytes(4).toString('hex')}`;
 /**
  * Generate a process-unique owner id: pid + random nonce.
  * Used for the exclusive holder field, and stamped into logs.
@@ -46,7 +47,6 @@ const crypto = __importStar(require("crypto"));
  * treated as a different owner (good: stale-recovery is correct).
  */
 function ownerId() {
-    const nonce = crypto.randomBytes(4).toString('hex');
-    return `${process.pid}:${nonce}`;
+    return PROCESS_OWNER_ID;
 }
 //# sourceMappingURL=owner.js.map

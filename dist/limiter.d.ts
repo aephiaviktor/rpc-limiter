@@ -110,6 +110,8 @@ export declare class RpcLimiter {
     /** Expose the self owner id. */
     getSelfId(): string;
     private reserveSlot;
+    private shouldRequeueReservedSlot;
+    private cancelQueuedSlots;
     private makeExclusive;
     private applyConfigOverride;
     private withLock;

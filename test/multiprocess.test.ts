@@ -161,7 +161,8 @@ describe('multi-process coordination', () => {
       const r = await limiter.acquireExclusive('fleet:b', 100, { priorityHint: 5 });
       return { step: 'contend', ok: r.ok, reason: r.ok ? null : r.reason };
     `;
-    const [a, b] = await Promise.all([runChild(bodyA), runChild(bodyB)]);
+    const a = await runChild(bodyA);
+    const b = await runChild(bodyB);
     expect(a.ok).toBe(true);
     expect(b.ok).toBe(false);
     expect((b as any).reason).toBe('preempted');

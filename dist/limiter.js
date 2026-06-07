@@ -41,6 +41,7 @@ const types_1 = require("./types");
 Object.defineProperty(exports, "STATE_VERSION", { enumerable: true, get: function () { return types_1.STATE_VERSION; } });
 const owner_1 = require("./owner");
 const metrics_1 = require("./metrics");
+const WAIT_REVALIDATE_INTERVAL_MS = 250;
 class RpcLimiter {
     paths;
     state;
@@ -108,7 +109,20 @@ class RpcLimiter {
                     throw new DeadlineExceededError(`wait('${bucketName}', label='${opts.label ?? ''}') would sleep ${sleepMs}ms past deadlineMs ${deadline}ms`);
                 }
             }
-            await this.sleep(sleepMs);
+            let remainingSleepMs = sleepMs;
+            let requeue = false;
+            while (remainingSleepMs > 0) {
+                const chunkMs = Math.min(remainingSleepMs, WAIT_REVALIDATE_INTERVAL_MS);
+                await this.sleep(chunkMs);
+                remainingSleepMs = grantMs - this.now();
+                if (await this.shouldRequeueReservedSlot(requestedAtMs)) {
+                    requeue = true;
+                    break;
+                }
+            }
+            if (requeue) {
+                continue;
+            }
             this.recordWaitMetric(bucketName, opts, totalWaitMs, false);
             return;
         }
@@ -154,6 +168,7 @@ class RpcLimiter {
                     existing.untilMs = Math.max(existing.untilMs, now + requested);
                     existing.label = label;
                     existing.priorityHint = priorityHint;
+                    this.cancelQueuedSlots(now);
                     (0, state_1.bumpRevision)(this.state);
                     return { ok: true, ownerId: this.selfId, untilMs: existing.untilMs };
                 }
@@ -162,6 +177,7 @@ class RpcLimiter {
                 if (existing.untilMs < now - STALE_GRACE_MS) {
                     this.state.exclusive = this.makeExclusive(label, requested, priorityHint, now);
                     this.state.lastExclusiveEndedAtMs = null;
+                    this.cancelQueuedSlots(now);
                     (0, state_1.bumpRevision)(this.state);
                     return { ok: true, ownerId: this.selfId, untilMs: this.state.exclusive.untilMs };
                 }
@@ -173,12 +189,14 @@ class RpcLimiter {
                 // We win by priority; take over.
                 this.state.exclusive = this.makeExclusive(label, requested, priorityHint, now);
                 this.state.lastExclusiveEndedAtMs = null;
+                this.cancelQueuedSlots(now);
                 (0, state_1.bumpRevision)(this.state);
                 return { ok: true, ownerId: this.selfId, untilMs: this.state.exclusive.untilMs };
             }
             // No exclusive held.
             this.state.exclusive = this.makeExclusive(label, requested, priorityHint, now);
             this.state.lastExclusiveEndedAtMs = null;
+            this.cancelQueuedSlots(now);
             (0, state_1.bumpRevision)(this.state);
             return { ok: true, ownerId: this.selfId, untilMs: this.state.exclusive.untilMs };
         });
@@ -248,8 +266,8 @@ class RpcLimiter {
         const now = this.now();
         const ex = this.state.exclusive;
         let floor = now;
-        if (ex) {
-            // Held by anyone: floor is at least the exclusive's end.
+        if (ex && ex.ownerId !== this.selfId) {
+            // Held by another process: floor is at least the exclusive's end.
             if (ex.untilMs > floor) {
                 floor = ex.untilMs;
             }
@@ -258,6 +276,23 @@ class RpcLimiter {
         bucket.nextSlotMs = grant + bucket.intervalMs;
         (0, state_1.bumpRevision)(this.state);
         return grant;
+    }
+    async shouldRequeueReservedSlot(requestedAtMs) {
+        return this.withLock(() => {
+            const ex = this.state.exclusive;
+            if (ex && ex.ownerId !== this.selfId && ex.acquiredAtMs >= requestedAtMs) {
+                return true;
+            }
+            const lastExclusiveEndedAtMs = this.state.lastExclusiveEndedAtMs;
+            return lastExclusiveEndedAtMs !== null && lastExclusiveEndedAtMs >= requestedAtMs;
+        });
+    }
+    cancelQueuedSlots(now) {
+        for (const bucket of Object.values(this.state.buckets)) {
+            if (bucket.nextSlotMs > now) {
+                bucket.nextSlotMs = now;
+            }
+        }
     }
     makeExclusive(label, requestedMs, priorityHint, now) {
         return {

@@ -1,5 +1,7 @@
 import * as crypto from 'crypto';
 
+const PROCESS_OWNER_ID = `${process.pid}:${crypto.randomBytes(4).toString('hex')}`;
+
 /**
  * Generate a process-unique owner id: pid + random nonce.
  * Used for the exclusive holder field, and stamped into logs.
@@ -11,6 +13,5 @@ import * as crypto from 'crypto';
  * treated as a different owner (good: stale-recovery is correct).
  */
 export function ownerId(): string {
-  const nonce = crypto.randomBytes(4).toString('hex');
-  return `${process.pid}:${nonce}`;
+  return PROCESS_OWNER_ID;
 }
