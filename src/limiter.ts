@@ -7,7 +7,13 @@ import {
   ensureBucket,
   bumpRevision,
 } from './state';
-import { RpcLimiterState, ExclusiveState, STATE_VERSION } from './types';
+import {
+  RpcLimiterState,
+  ExclusiveState,
+  STATE_VERSION,
+  ProviderId,
+  ProviderState,
+} from './types';
 import { ownerId } from './owner';
 import { recordRpcMetric, RpcMetricLabels } from './metrics';
 
@@ -40,11 +46,22 @@ export type AcquireExclusiveResult =
   | { ok: true; ownerId: string; untilMs: number }
   | { ok: false; reason: 'preempted' | 'min-normal-violated' | 'cooldown'; holder?: ExclusiveState; retryAfterMs?: number };
 
+/**
+ * Provider that the limiter routed this `wait()` to. The bot should send
+ * the corresponding RPC to `getProviderUrls()[result.provider]`.
+ */
+export interface WaitResult {
+  provider: ProviderId;
+}
+
 export interface RpcLimiterOptions {
   /** Shared state directory override; otherwise resolves via RPC_LIMITER_HOME / ~/.rpc_limiter. */
   homeOverride?: string;
   /** Override the config fields (e.g. when per-bot override is set). */
-  configOverride?: Partial<Pick<RpcLimiterState, 'enabled' | 'apiKey' | 'rpcBaseUrl' | 'limits'>> & {
+  configOverride?: Partial<
+    Pick<RpcLimiterState, 'enabled' | 'limits'>
+  > & {
+    providers?: Partial<Record<ProviderId, { rpcBaseUrl?: string; apiKey?: string }>>;
     buckets?: Record<string, { intervalMs: number }>;
   };
   /** Override Date.now for tests. */
@@ -87,21 +104,31 @@ export class RpcLimiter {
 
   /**
    * Reserve a slot in the named bucket. Sleeps until the slot is granted
-   * (or until deadlineMs, whichever comes first).
+   * (or until deadlineMs, whichever comes first). Returns the provider the
+   * caller should send the RPC to.
+   *
+   * Provider selection:
+   *   - If another process holds a `fleet:aggressive` exclusive, prefer
+   *     `main` so the aggressive race can use `fallback` directly.
+   *   - Otherwise round-robin 50/50 between main and fallback.
+   *   - In either case, a provider in cooldown (cooldownUntilMs > now) is
+   *     skipped; if both are in cooldown, the call still returns a provider
+   *     (caller will see a clear network error).
    *
    * Steps:
    *   1. Acquire the cross-process lockfile.
    *   2. Read state; if an exclusive is held by a *live* owner, reserve
    *      a grant time after the exclusive ends.
-   *   3. Reserve the next slot in the bucket: grantMs = max(now, nextSlotMs).
-   *   4. Write back nextSlotMs = grantMs + intervalMs.
-   *   5. Release the lockfile.
-   *   6. Sleep until grantMs, or fail with DeadlineExceededError.
+   *   3. Pick a provider.
+   *   4. Reserve the next slot in the bucket: grantMs = max(now, nextSlotMs).
+   *   5. Write back nextSlotMs = grantMs + intervalMs.
+   *   6. Release the lockfile.
+   *   7. Sleep until grantMs, or fail with DeadlineExceededError.
    */
-  async wait(bucketName: string, opts: WaitOptions = {}): Promise<void> {
+  async wait(bucketName: string, opts: WaitOptions = {}): Promise<WaitResult> {
     if (!this.state.enabled) {
-      // Limiter disabled: pass through.
-      return;
+      // Limiter disabled: pass through. Default to 'main' for the caller's URL.
+      return { provider: 'main' };
     }
 
     const deadline = opts.deadlineMs;
@@ -109,17 +136,29 @@ export class RpcLimiter {
 
     while (true) {
       const requestedAtMs = this.now();
-      const grantMs = await this.withLock(() => this.reserveSlot(bucketName));
+      const decision = await this.withLock(() => {
+        const ex = this.state.exclusive;
+        // Only flip routing to main while the fleet race is actually live.
+        // An expired exclusive (untilMs <= now) means the race is over and
+        // we should go back to round-robin.
+        const preferMain =
+          !!(ex && ex.ownerId !== this.selfId && ex.label === 'fleet:aggressive' && ex.untilMs > this.now());
+        const provider = this.pickProvider(preferMain);
+        const grantMs = this.reserveSlot(bucketName);
+        return { grantMs, provider };
+      });
+      const grantMs = decision.grantMs;
+      const provider = decision.provider;
       const now = this.now();
       const sleepMs = grantMs - now;
       const totalWaitMs = Math.max(0, grantMs - requestedAtMs);
 
       if (sleepMs <= 0) {
-        this.recordWaitMetric(bucketName, opts, totalWaitMs, false);
-        return;
+        this.recordWaitMetric(bucketName, opts, totalWaitMs, false, provider);
+        return { provider };
       }
       if (maxWait !== undefined && sleepMs > maxWait) {
-        this.recordWaitMetric(bucketName, opts, totalWaitMs, true);
+        this.recordWaitMetric(bucketName, opts, totalWaitMs, true, provider);
         throw new WaitTimeoutError(
           `wait('${bucketName}', label='${opts.label ?? ''}') would sleep ${sleepMs}ms > maxWaitMs ${maxWait}ms`
         );
@@ -127,7 +166,7 @@ export class RpcLimiter {
       if (deadline !== undefined) {
         const remaining = deadline - now;
         if (sleepMs > remaining) {
-          this.recordWaitMetric(bucketName, opts, totalWaitMs, true);
+          this.recordWaitMetric(bucketName, opts, totalWaitMs, true, provider);
           throw new DeadlineExceededError(
             `wait('${bucketName}', label='${opts.label ?? ''}') would sleep ${sleepMs}ms past deadlineMs ${deadline}ms`
           );
@@ -147,8 +186,8 @@ export class RpcLimiter {
       if (requeue) {
         continue;
       }
-      this.recordWaitMetric(bucketName, opts, totalWaitMs, false);
-      return;
+      this.recordWaitMetric(bucketName, opts, totalWaitMs, false, provider);
+      return { provider };
     }
   }
 
@@ -284,6 +323,88 @@ export class RpcLimiter {
   }
 
   /**
+   * Report the outcome of a request made to a specific provider. The limiter
+   * tracks a sliding failure count; on `limits.failureThreshold` non-`ok`
+   * outcomes the provider is put into cooldown for `limits.cooldownMs`.
+   *
+   * This is how bots signal "this account just 429'd" → the limiter routes
+   * the next `wait()` to the other provider.
+   */
+  async recordProviderOutcome(
+    provider: ProviderId,
+    outcome: 'ok' | 'rate_limited' | 'error',
+  ): Promise<void> {
+    if (!this.state.enabled) return;
+
+    await this.withLock(() => {
+      const p = this.state.providers[provider];
+      if (!p) return;
+      if (outcome === 'ok') {
+        p.failures = 0;
+        p.cooldownUntilMs = null;
+      } else {
+        p.failures = (p.failures + 1) | 0;
+        if (p.failures >= this.state.limits.failureThreshold) {
+          p.cooldownUntilMs = this.now() + this.state.limits.cooldownMs;
+          p.failures = 0; // reset; cooldown takes over until expiry
+        }
+      }
+      bumpRevision(this.state);
+    });
+  }
+
+  /**
+   * Pick a provider for the next `wait()`. Honors cooldown (a provider in
+   * cooldown is never picked unless the other is also unavailable). If
+   * `preferMain` is true and main is available, main wins regardless of
+   * the round-robin counter. Otherwise round-robins 50/50.
+   *
+   * Must be called under the lockfile.
+   */
+  private pickProvider(preferMain: boolean): ProviderId {
+    const now = this.now();
+    const main = this.state.providers.main;
+    const fallback = this.state.providers.fallback;
+    const isAvailable = (p: ProviderState) =>
+      Boolean(p.rpcBaseUrl) && (p.cooldownUntilMs === null || p.cooldownUntilMs <= now);
+    const mainAvail = isAvailable(main);
+    const fallbackAvail = isAvailable(fallback);
+
+    if (preferMain) {
+      if (mainAvail) return 'main';
+      if (fallbackAvail) return 'fallback';
+      return 'main';
+    }
+
+    if (mainAvail && fallbackAvail) {
+      const pick: ProviderId = this.state.providersRoundRobinCounter % 2 === 0 ? 'main' : 'fallback';
+      this.state.providersRoundRobinCounter = (this.state.providersRoundRobinCounter + 1) | 0;
+      return pick;
+    }
+    if (mainAvail) return 'main';
+    if (fallbackAvail) return 'fallback';
+    return 'main';
+  }
+
+  /**
+   * Get the full RPC URL (with api-key) for a provider. Empty string if
+   * the provider has no base URL configured.
+   */
+  getProviderUrl(provider: ProviderId): string {
+    return buildProviderUrl(this.state.providers[provider]);
+  }
+
+  /**
+   * Get full RPC URLs for both providers in one call.
+   */
+  getProviderUrls(): Record<ProviderId, string> {
+    return {
+      main: buildProviderUrl(this.state.providers.main),
+      fallback: buildProviderUrl(this.state.providers.fallback),
+    };
+  }
+
+  /**
    * Read-only status snapshot. Returns a shallow copy.
    */
   status(): Omit<RpcLimiterState, never> {
@@ -359,10 +480,16 @@ export class RpcLimiter {
   private applyConfigOverride(): void {
     if (!this.configOverride) return;
     if (this.configOverride.enabled !== undefined) this.state.enabled = this.configOverride.enabled;
-    if (this.configOverride.apiKey !== undefined) this.state.apiKey = this.configOverride.apiKey;
-    if (this.configOverride.rpcBaseUrl !== undefined) this.state.rpcBaseUrl = this.configOverride.rpcBaseUrl;
     if (this.configOverride.limits !== undefined) {
       this.state.limits = { ...this.state.limits, ...this.configOverride.limits };
+    }
+    if (this.configOverride.providers) {
+      for (const id of ['main', 'fallback'] as const) {
+        const override = this.configOverride.providers[id];
+        if (!override) continue;
+        if (override.rpcBaseUrl !== undefined) this.state.providers[id].rpcBaseUrl = override.rpcBaseUrl;
+        if (override.apiKey !== undefined) this.state.providers[id].apiKey = override.apiKey;
+      }
     }
     if (this.configOverride.buckets) {
       for (const [name, def] of Object.entries(this.configOverride.buckets)) {
@@ -403,6 +530,7 @@ export class RpcLimiter {
     opts: WaitOptions,
     waitMs: number,
     rejected: boolean,
+    provider: ProviderId,
   ): void {
     const labels = opts.metrics;
     const method = labels?.method ?? opts.label ?? bucketName;
@@ -414,6 +542,7 @@ export class RpcLimiter {
         profile: labels?.profile,
         method,
         bucket: bucketName,
+        provider,
         waitMs,
         rejected,
       },
@@ -446,6 +575,23 @@ function compareExclusive(existing: ExclusiveState, challenger: ExclusiveState):
   return 'existing';
 }
 
+/**
+ * Build a full RPC URL from a ProviderState (base + api-key query param).
+ * Returns empty string when the provider has no base URL.
+ */
+function buildProviderUrl(p: ProviderState): string {
+  if (!p.rpcBaseUrl) return '';
+  if (!p.apiKey) return p.rpcBaseUrl;
+  try {
+    const url = new URL(p.rpcBaseUrl);
+    url.searchParams.set('api-key', p.apiKey);
+    return url.toString();
+  } catch {
+    const separator = p.rpcBaseUrl.includes('?') ? '&' : '?';
+    return `${p.rpcBaseUrl}${separator}api-key=${encodeURIComponent(p.apiKey)}`;
+  }
+}
+
 export class DeadlineExceededError extends Error {
   readonly kind = 'deadline-exceeded';
   constructor(message: string) {
@@ -463,5 +609,5 @@ export class WaitTimeoutError extends Error {
 }
 
 // Re-export for completeness.
-export { RpcLimiterState, ExclusiveState, STATE_VERSION };
+export { RpcLimiterState, ExclusiveState, STATE_VERSION, ProviderId, ProviderState };
 export { resolvePaths } from './paths';

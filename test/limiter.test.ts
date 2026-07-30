@@ -419,7 +419,336 @@ describe('RpcLimiter — status()', () => {
     const s1 = limiter.status();
     const s2 = limiter.status();
     expect(s1).not.toBe(s2);
-    expect(s1.version).toBe(1);
+    expect(s1.version).toBe(2);
     expect(s1.enabled).toBe(true);
+  });
+});
+
+describe('RpcLimiter — multi-provider routing', () => {
+  let home: string;
+  beforeEach(() => {
+    home = freshHome();
+  });
+
+  it('wait() returns a valid provider when both are configured', async () => {
+    const limiter = new RpcLimiter({
+      homeOverride: home,
+      configOverride: {
+        providers: {
+          main: { rpcBaseUrl: 'https://main.example.com', apiKey: 'm' },
+          fallback: { rpcBaseUrl: 'https://fallback.example.com', apiKey: 'f' },
+        },
+        buckets: { 'rpc:shared': { intervalMs: 0 } },
+      },
+    });
+    const r = await limiter.wait('rpc:shared');
+    expect(r.provider === 'main' || r.provider === 'fallback').toBe(true);
+  });
+
+  it('wait() round-robins ~50/50 over 100 calls when both providers are healthy', async () => {
+    const limiter = new RpcLimiter({
+      homeOverride: home,
+      configOverride: {
+        providers: {
+          main: { rpcBaseUrl: 'https://main.example.com', apiKey: 'm' },
+          fallback: { rpcBaseUrl: 'https://fallback.example.com', apiKey: 'f' },
+        },
+        buckets: { 'rpc:shared': { intervalMs: 0 } },
+      },
+    });
+    let main = 0;
+    let fallback = 0;
+    for (let i = 0; i < 100; i++) {
+      const r = await limiter.wait('rpc:shared');
+      if (r.provider === 'main') main++;
+      else fallback++;
+    }
+    // Expect ~50/50; allow ±20 for serial ordering + lock overhead.
+    expect(main).toBeGreaterThan(30);
+    expect(main).toBeLessThan(70);
+    expect(fallback).toBeGreaterThan(30);
+    expect(fallback).toBeLessThan(70);
+    expect(main + fallback).toBe(100);
+  });
+
+  it('wait() prefers main while another process holds fleet:aggressive', async () => {
+    const paths = resolvePaths(home);
+    const now = Date.now();
+    const state = {
+      version: 2,
+      enabled: true,
+      providers: {
+        main: { rpcBaseUrl: 'https://main.example.com', apiKey: 'm', failures: 0, cooldownUntilMs: null },
+        fallback: { rpcBaseUrl: 'https://fallback.example.com', apiKey: 'f', failures: 0, cooldownUntilMs: null },
+      },
+      providersRoundRobinCounter: 0,
+      buckets: { 'rpc:shared': { nextSlotMs: 0, intervalMs: 0 } },
+      limits: {
+        maxExclusiveMs: 30_000,
+        minNormalMsBetweenExclusives: 0,
+        cooldownMs: 3_600_000,
+        failureThreshold: 3,
+      },
+      exclusive: {
+        ownerId: '999:other',
+        label: 'fleet:aggressive',
+        acquiredAtMs: now,
+        untilMs: now + 200, // live for 200ms — covers the first call's window
+        priorityHint: 0,
+      },
+      lastExclusiveEndedAtMs: null,
+      revision: 0,
+    };
+    fs.writeFileSync(paths.stateFile, JSON.stringify(state));
+
+    const limiter = new RpcLimiter({ homeOverride: home });
+    // One call only. The first wait() respects the live exclusive (grants at
+    // untilMs ≈ now+200ms) and the preferMain flip is 'true', so the picked
+    // provider should be 'main'. Subsequent calls would see the now-expired
+    // exclusive and round-robin — that's covered by the 50/50 test above.
+    const r = await limiter.wait('rpc:shared');
+    expect(r.provider).toBe('main');
+  });
+
+  it('wait() does NOT prefer main once the fleet:aggressive exclusive expires', async () => {
+    const paths = resolvePaths(home);
+    const now = Date.now();
+    const state = {
+      version: 2,
+      enabled: true,
+      providers: {
+        main: { rpcBaseUrl: 'https://main.example.com', apiKey: 'm', failures: 0, cooldownUntilMs: null },
+        fallback: { rpcBaseUrl: 'https://fallback.example.com', apiKey: 'f', failures: 0, cooldownUntilMs: null },
+      },
+      providersRoundRobinCounter: 0,
+      buckets: { 'rpc:shared': { nextSlotMs: 0, intervalMs: 0 } },
+      limits: {
+        maxExclusiveMs: 30_000,
+        minNormalMsBetweenExclusives: 0,
+        cooldownMs: 3_600_000,
+        failureThreshold: 3,
+      },
+      exclusive: {
+        ownerId: '999:other',
+        label: 'fleet:aggressive',
+        acquiredAtMs: now - 10_000, // long ago
+        untilMs: now - 5_000, // already expired
+        priorityHint: 0,
+      },
+      lastExclusiveEndedAtMs: null,
+      revision: 0,
+    };
+    fs.writeFileSync(paths.stateFile, JSON.stringify(state));
+
+    const limiter = new RpcLimiter({ homeOverride: home });
+    // Exclusive is expired (untilMs < now) → preferMain must be false → round-robin.
+    const r1 = await limiter.wait('rpc:shared');
+    const r2 = await limiter.wait('rpc:shared');
+    expect(r1.provider === 'main' || r1.provider === 'fallback').toBe(true);
+    expect(r2.provider === 'main' || r2.provider === 'fallback').toBe(true);
+    expect(r1.provider).not.toBe(r2.provider); // round-robin alternates
+  });
+
+  it('wait() skips a provider in cooldown, routes only to the other', async () => {
+    const limiter = new RpcLimiter({
+      homeOverride: home,
+      configOverride: {
+        providers: {
+          main: { rpcBaseUrl: 'https://main.example.com', apiKey: 'm' },
+          fallback: { rpcBaseUrl: 'https://fallback.example.com', apiKey: 'f' },
+        },
+        buckets: { 'rpc:shared': { intervalMs: 0 } },
+        limits: { failureThreshold: 2, cooldownMs: 60_000 },
+      },
+    });
+    await limiter.recordProviderOutcome('main', 'rate_limited');
+    await limiter.recordProviderOutcome('main', 'rate_limited');
+    // main should now be in cooldown.
+    expect(limiter.status().providers.main.cooldownUntilMs).not.toBeNull();
+
+    for (let i = 0; i < 20; i++) {
+      const r = await limiter.wait('rpc:shared');
+      expect(r.provider).toBe('fallback');
+    }
+  });
+
+  it('wait() falls back to main when fallback is in cooldown and preferMain is set', async () => {
+    // Edge case: another bot is racing (preferMain), but main is in cooldown.
+    // We should NOT starve — fall through to fallback.
+    const paths = resolvePaths(home);
+    const now = Date.now();
+    const state = {
+      version: 2,
+      enabled: true,
+      providers: {
+        main: { rpcBaseUrl: 'https://main.example.com', apiKey: 'm', failures: 0, cooldownUntilMs: now + 60_000 },
+        fallback: { rpcBaseUrl: 'https://fallback.example.com', apiKey: 'f', failures: 0, cooldownUntilMs: null },
+      },
+      providersRoundRobinCounter: 0,
+      buckets: { 'rpc:shared': { nextSlotMs: 0, intervalMs: 0 } },
+      limits: {
+        maxExclusiveMs: 30_000,
+        minNormalMsBetweenExclusives: 0,
+        cooldownMs: 3_600_000,
+        failureThreshold: 3,
+      },
+      exclusive: {
+        ownerId: '999:other',
+        label: 'fleet:aggressive',
+        acquiredAtMs: now,
+        untilMs: now + 30,
+        priorityHint: 0,
+      },
+      lastExclusiveEndedAtMs: null,
+      revision: 0,
+    };
+    fs.writeFileSync(paths.stateFile, JSON.stringify(state));
+
+    const limiter = new RpcLimiter({ homeOverride: home });
+    for (let i = 0; i < 5; i++) {
+      const r = await limiter.wait('rpc:shared');
+      expect(r.provider).toBe('fallback');
+    }
+  });
+
+  it('recordProviderOutcome trips cooldown at failureThreshold', async () => {
+    const limiter = new RpcLimiter({
+      homeOverride: home,
+      configOverride: {
+        providers: {
+          main: { rpcBaseUrl: 'https://main.example.com', apiKey: 'm' },
+          fallback: { rpcBaseUrl: 'https://fallback.example.com', apiKey: 'f' },
+        },
+        limits: { failureThreshold: 3, cooldownMs: 60_000 },
+      },
+    });
+    expect(limiter.status().providers.main.cooldownUntilMs).toBeNull();
+
+    await limiter.recordProviderOutcome('main', 'rate_limited');
+    expect(limiter.status().providers.main.cooldownUntilMs).toBeNull();
+    expect(limiter.status().providers.main.failures).toBe(1);
+
+    await limiter.recordProviderOutcome('main', 'rate_limited');
+    expect(limiter.status().providers.main.cooldownUntilMs).toBeNull();
+    expect(limiter.status().providers.main.failures).toBe(2);
+
+    await limiter.recordProviderOutcome('main', 'rate_limited');
+    expect(limiter.status().providers.main.cooldownUntilMs).not.toBeNull();
+    expect(limiter.status().providers.main.failures).toBe(0); // reset
+  });
+
+  it('recordProviderOutcome("ok") clears failures and cooldown', async () => {
+    const limiter = new RpcLimiter({
+      homeOverride: home,
+      configOverride: {
+        providers: {
+          main: { rpcBaseUrl: 'https://main.example.com', apiKey: 'm' },
+          fallback: { rpcBaseUrl: 'https://fallback.example.com', apiKey: 'f' },
+        },
+        limits: { failureThreshold: 2, cooldownMs: 60_000 },
+      },
+    });
+    await limiter.recordProviderOutcome('main', 'rate_limited');
+    await limiter.recordProviderOutcome('main', 'rate_limited');
+    expect(limiter.status().providers.main.cooldownUntilMs).not.toBeNull();
+
+    await limiter.recordProviderOutcome('main', 'ok');
+    expect(limiter.status().providers.main.cooldownUntilMs).toBeNull();
+    expect(limiter.status().providers.main.failures).toBe(0);
+  });
+
+  it('getProviderUrl returns full URL with api-key appended', () => {
+    const limiter = new RpcLimiter({
+      homeOverride: home,
+      configOverride: {
+        providers: {
+          main: { rpcBaseUrl: 'https://main.example.com/', apiKey: 'my-key' },
+          fallback: { rpcBaseUrl: 'https://fallback.example.com/', apiKey: 'fb-key' },
+        },
+      },
+    });
+    expect(limiter.getProviderUrl('main')).toBe('https://main.example.com/?api-key=my-key');
+    expect(limiter.getProviderUrl('fallback')).toBe('https://fallback.example.com/?api-key=fb-key');
+  });
+
+  it('getProviderUrl returns base URL when no api-key', () => {
+    const limiter = new RpcLimiter({
+      homeOverride: home,
+      configOverride: {
+        providers: {
+          main: { rpcBaseUrl: 'https://main.example.com/', apiKey: '' },
+          fallback: { rpcBaseUrl: '', apiKey: '' },
+        },
+      },
+    });
+    expect(limiter.getProviderUrl('main')).toBe('https://main.example.com/');
+    expect(limiter.getProviderUrl('fallback')).toBe('');
+  });
+
+  it('getProviderUrls returns both providers in one call', () => {
+    const limiter = new RpcLimiter({
+      homeOverride: home,
+      configOverride: {
+        providers: {
+          main: { rpcBaseUrl: 'https://main.example.com', apiKey: 'm' },
+          fallback: { rpcBaseUrl: 'https://fallback.example.com', apiKey: 'f' },
+        },
+      },
+    });
+    const urls = limiter.getProviderUrls();
+    // `new URL('https://main.example.com')` normalizes the path to '/', so the
+    // appended `?api-key=...` lands after the trailing slash.
+    expect(urls.main).toBe('https://main.example.com/?api-key=m');
+    expect(urls.fallback).toBe('https://fallback.example.com/?api-key=f');
+  });
+});
+
+describe('RpcLimiter — v1→v2 state migration', () => {
+  let home: string;
+  beforeEach(() => {
+    home = freshHome();
+  });
+
+  it('migrates v1 state: apiKey + rpcBaseUrl become providers.main', () => {
+    const paths = resolvePaths(home);
+    const v1 = {
+      version: 1,
+      enabled: true,
+      apiKey: 'old-key',
+      rpcBaseUrl: 'https://old.example.com/',
+      buckets: { 'rpc:shared': { nextSlotMs: 0, intervalMs: 1000 } },
+      limits: { maxExclusiveMs: 30_000, minNormalMsBetweenExclusives: 5_000 },
+      exclusive: null,
+      lastExclusiveEndedAtMs: null,
+      revision: 7,
+    };
+    fs.writeFileSync(paths.stateFile, JSON.stringify(v1));
+
+    const limiter = new RpcLimiter({ homeOverride: home });
+    const status = limiter.status();
+    expect(status.version).toBe(2);
+    expect(status.providers.main.rpcBaseUrl).toBe('https://old.example.com/');
+    expect(status.providers.main.apiKey).toBe('old-key');
+    expect(status.providers.fallback.rpcBaseUrl).toBe('');
+    expect(status.providers.fallback.apiKey).toBe('');
+    expect(status.providersRoundRobinCounter).toBe(0);
+    expect(status.limits.cooldownMs).toBe(3_600_000);
+    expect(status.limits.failureThreshold).toBe(3);
+  });
+
+  it('migrates pre-version state (treated as v1)', () => {
+    const paths = resolvePaths(home);
+    const oldState = {
+      enabled: true,
+      apiKey: 'legacy',
+      rpcBaseUrl: 'https://legacy.example.com',
+    };
+    fs.writeFileSync(paths.stateFile, JSON.stringify(oldState));
+
+    const limiter = new RpcLimiter({ homeOverride: home });
+    const status = limiter.status();
+    expect(status.version).toBe(2);
+    expect(status.providers.main.apiKey).toBe('legacy');
+    expect(status.providers.main.rpcBaseUrl).toBe('https://legacy.example.com');
   });
 });

@@ -225,6 +225,7 @@ function addSample(windows, windowKey, sample, nowMs) {
         profile: normalized.profile,
         method: normalized.method,
         bucket: normalized.bucket,
+        provider: normalized.provider,
         count: 0,
         waitedCount: 0,
         totalWaitMs: 0,
@@ -253,9 +254,17 @@ function normalizeSample(sample) {
         profile: cleanLabel(sample.profile, 'default'),
         method: normalizeRpcMethod(sample.method),
         bucket: cleanLabel(sample.bucket, 'unknown-bucket'),
+        provider: cleanProvider(sample.provider),
         waitMs: Math.max(0, Math.round(sample.waitMs ?? 0)),
         rejected: Boolean(sample.rejected),
     };
+}
+function cleanProvider(value) {
+    if (value === 'main' || value === 'fallback')
+        return value;
+    // Backwards compat: old metrics (pre-multi-provider) had no provider label.
+    // Bucket them under 'main' so existing on-disk data still aggregates.
+    return 'main';
 }
 function cleanLabel(value, fallback) {
     const cleaned = String(value ?? '').trim();
@@ -267,11 +276,14 @@ function metricKey(sample) {
         encodeURIComponent(sample.profile),
         encodeURIComponent(sample.bucket),
         encodeURIComponent(sample.method),
+        encodeURIComponent(sample.provider),
     ].join('|');
 }
 function splitMetricKey(key) {
-    const [app = '', profile = '', bucket = '', method = ''] = key.split('|').map(decodeURIComponent);
-    return { app, profile, bucket, method };
+    const [app = '', profile = '', bucket = '', method = '', provider = 'main'] = key
+        .split('|')
+        .map(decodeURIComponent);
+    return { app, profile, bucket, method, provider: provider === 'fallback' ? 'fallback' : 'main' };
 }
 function pruneMetrics(metrics, nowMs) {
     pruneWindows(metrics.minutes, 'minute', nowMs - metrics.retention.minuteMs);

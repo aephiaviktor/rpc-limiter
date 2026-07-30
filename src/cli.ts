@@ -16,17 +16,22 @@ Usage:
 
 Keys for 'set':
   enabled=true|false
-  apiKey=<value>
-  rpcBaseUrl=<url>
+  providers.main.rpcBaseUrl=<url>
+  providers.main.apiKey=<value>
+  providers.fallback.rpcBaseUrl=<url>
+  providers.fallback.apiKey=<value>
   buckets.rpc:shared.intervalMs=<ms>
   limits.maxExclusiveMs=<ms>
   limits.minNormalMsBetweenExclusives=<ms>
+  limits.cooldownMs=<ms>
+  limits.failureThreshold=<n>
 
 Env:
   RPC_LIMITER_HOME  Override shared state directory (default: ~/.rpc_limiter)
 
 Examples:
-  rpc-limiter set apiKey=61b4b51d-... rpcBaseUrl=https://mainnet.helius-rpc.com
+  rpc-limiter set providers.main.apiKey=*** providers.main.rpcBaseUrl=https://mainnet.helius-rpc.com
+  rpc-limiter set providers.fallback.apiKey=*** providers.fallback.rpcBaseUrl=https://mainnet.helius-rpc.com
   rpc-limiter set buckets.rpc:shared.intervalMs=200
   rpc-limiter status
   rpc-limiter metrics
@@ -36,6 +41,11 @@ function readStateFile(file: string): RpcLimiterState {
   if (!fs.existsSync(file)) {
     return {
       ...DEFAULT_CONFIG,
+      providers: {
+        main: { ...DEFAULT_CONFIG.providers.main },
+        fallback: { ...DEFAULT_CONFIG.providers.fallback },
+      },
+      providersRoundRobinCounter: 0,
       buckets: { 'rpc:shared': { ...DEFAULT_BUCKET } },
       exclusive: null,
       lastExclusiveEndedAtMs: null,
@@ -94,6 +104,19 @@ function main(argv: string[]): number {
   if (cmd === 'status') {
     const state = readStateFile(paths.stateFile);
     process.stdout.write(JSON.stringify(state, null, 2) + '\n');
+    process.stdout.write('\n--- summary ---\n');
+    for (const id of ['main', 'fallback'] as const) {
+      const p = state.providers[id];
+      const url = p.rpcBaseUrl || '(unset)';
+      const inCd = !!(p.cooldownUntilMs && p.cooldownUntilMs > Date.now());
+      process.stdout.write(`provider ${id}: ${url} failures=${p.failures}${inCd ? ` (cooldown until ${new Date(p.cooldownUntilMs!).toISOString()})` : ''}\n`);
+    }
+    process.stdout.write(`round-robin counter: ${state.providersRoundRobinCounter}\n`);
+    if (state.exclusive) {
+      process.stdout.write(`exclusive held by: ${state.exclusive.ownerId} label=${state.exclusive.label} until=${new Date(state.exclusive.untilMs).toISOString()}\n`);
+    } else {
+      process.stdout.write('no exclusive held\n');
+    }
     return 0;
   }
 
@@ -115,6 +138,12 @@ function main(argv: string[]): number {
     for (const [name, b] of Object.entries(state.buckets)) {
       process.stdout.write(`${name}: nextSlotMs=${b.nextSlotMs} intervalMs=${b.intervalMs}\n`);
     }
+    process.stdout.write('--- provider summary ---\n');
+    for (const id of ['main', 'fallback'] as const) {
+      const p = state.providers[id];
+      const inCd = !!(p.cooldownUntilMs && p.cooldownUntilMs > Date.now());
+      process.stdout.write(`${id}: url=${p.rpcBaseUrl || '(unset)'} failures=${p.failures}${inCd ? ` cooldownUntil=${new Date(p.cooldownUntilMs!).toISOString()}` : ''}\n`);
+    }
     if (state.exclusive) {
       process.stdout.write('--- exclusive held ---\n');
       process.stdout.write(JSON.stringify(state.exclusive, null, 2) + '\n');
@@ -127,6 +156,11 @@ function main(argv: string[]): number {
   if (cmd === 'reset') {
     const fresh: RpcLimiterState = {
       ...DEFAULT_CONFIG,
+      providers: {
+        main: { ...DEFAULT_CONFIG.providers.main },
+        fallback: { ...DEFAULT_CONFIG.providers.fallback },
+      },
+      providersRoundRobinCounter: 0,
       buckets: { 'rpc:shared': { ...DEFAULT_BUCKET } },
       exclusive: null,
       lastExclusiveEndedAtMs: null,

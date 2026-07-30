@@ -114,6 +114,11 @@ function writeStateSync(stateFile, state) {
 function freshState() {
     return {
         ...types_1.DEFAULT_CONFIG,
+        providers: {
+            main: { ...types_1.DEFAULT_CONFIG.providers.main },
+            fallback: { ...types_1.DEFAULT_CONFIG.providers.fallback },
+        },
+        providersRoundRobinCounter: 0,
         buckets: {
             'rpc:shared': { ...types_1.DEFAULT_BUCKET },
         },
@@ -126,15 +131,64 @@ function migrate(state, stateFile) {
     if (!state || typeof state !== 'object') {
         return freshState();
     }
+    // v1 → v2: copy top-level apiKey + rpcBaseUrl into providers.main.
+    // The old fields are dropped; v2 reads only providers[*].
+    if (state.version === 1 || state.version === undefined) {
+        const oldApiKey = typeof state.apiKey === 'string' ? state.apiKey : '';
+        const oldRpcBaseUrl = typeof state.rpcBaseUrl === 'string' && state.rpcBaseUrl
+            ? state.rpcBaseUrl
+            : types_1.DEFAULT_CONFIG.providers.main.rpcBaseUrl;
+        return {
+            version: types_1.STATE_VERSION,
+            enabled: state.enabled ?? types_1.DEFAULT_CONFIG.enabled,
+            providers: {
+                main: {
+                    rpcBaseUrl: oldRpcBaseUrl,
+                    apiKey: oldApiKey,
+                    failures: 0,
+                    cooldownUntilMs: null,
+                },
+                fallback: { ...types_1.DEFAULT_CONFIG.providers.fallback },
+            },
+            providersRoundRobinCounter: 0,
+            buckets: state.buckets ?? { 'rpc:shared': { ...types_1.DEFAULT_BUCKET } },
+            limits: {
+                maxExclusiveMs: state.limits?.maxExclusiveMs ?? types_1.DEFAULT_CONFIG.limits.maxExclusiveMs,
+                minNormalMsBetweenExclusives: state.limits?.minNormalMsBetweenExclusives ?? types_1.DEFAULT_CONFIG.limits.minNormalMsBetweenExclusives,
+                cooldownMs: types_1.DEFAULT_CONFIG.limits.cooldownMs,
+                failureThreshold: types_1.DEFAULT_CONFIG.limits.failureThreshold,
+            },
+            exclusive: state.exclusive ?? null,
+            lastExclusiveEndedAtMs: state.lastExclusiveEndedAtMs ?? null,
+            revision: state.revision ?? 0,
+        };
+    }
     if (state.version !== types_1.STATE_VERSION) {
-        // Future: write migration shims. For now, fresh state is the safest fallback.
+        // Unknown future version — start fresh.
         return freshState();
     }
-    // Defensive defaults for missing fields.
+    // v2 defensive defaults for missing fields.
     state.enabled = state.enabled ?? types_1.DEFAULT_CONFIG.enabled;
-    state.apiKey = state.apiKey ?? types_1.DEFAULT_CONFIG.apiKey;
-    state.rpcBaseUrl = state.rpcBaseUrl ?? types_1.DEFAULT_CONFIG.rpcBaseUrl;
-    state.limits = state.limits ?? types_1.DEFAULT_CONFIG.limits;
+    state.providers = state.providers ?? {
+        main: { ...types_1.DEFAULT_CONFIG.providers.main },
+        fallback: { ...types_1.DEFAULT_CONFIG.providers.fallback },
+    };
+    state.providers.main = state.providers.main ?? { ...types_1.DEFAULT_CONFIG.providers.main };
+    state.providers.fallback = state.providers.fallback ?? { ...types_1.DEFAULT_CONFIG.providers.fallback };
+    for (const id of ['main', 'fallback']) {
+        const p = state.providers[id];
+        p.rpcBaseUrl = p.rpcBaseUrl ?? '';
+        p.apiKey = p.apiKey ?? '';
+        p.failures = p.failures ?? 0;
+        p.cooldownUntilMs = p.cooldownUntilMs ?? null;
+    }
+    state.providersRoundRobinCounter = state.providersRoundRobinCounter ?? 0;
+    state.limits = state.limits ?? { ...types_1.DEFAULT_CONFIG.limits };
+    state.limits.maxExclusiveMs = state.limits.maxExclusiveMs ?? types_1.DEFAULT_CONFIG.limits.maxExclusiveMs;
+    state.limits.minNormalMsBetweenExclusives =
+        state.limits.minNormalMsBetweenExclusives ?? types_1.DEFAULT_CONFIG.limits.minNormalMsBetweenExclusives;
+    state.limits.cooldownMs = state.limits.cooldownMs ?? types_1.DEFAULT_CONFIG.limits.cooldownMs;
+    state.limits.failureThreshold = state.limits.failureThreshold ?? types_1.DEFAULT_CONFIG.limits.failureThreshold;
     state.buckets = state.buckets ?? { 'rpc:shared': { ...types_1.DEFAULT_BUCKET } };
     state.exclusive = state.exclusive ?? null;
     state.lastExclusiveEndedAtMs = state.lastExclusiveEndedAtMs ?? null;

@@ -1,5 +1,16 @@
 /**
- * Shared state schema (version 1).
+ * Shared state schema.
+ *
+ * Version 2 (multi-provider):
+ * - Two named providers (`main`, `fallback`) instead of a single top-level
+ *   `apiKey`/`rpcBaseUrl`. v1 state is one-way migrated on read: the old
+ *   values land in `providers.main`; `providers.fallback` starts empty and
+ *   must be configured by the user.
+ * - Each provider tracks recent failures and a cooldown timestamp. After
+ *   `limits.failureThreshold` non-`ok` outcomes, a provider is marked
+ *   `cooldownUntilMs = now + limits.cooldownMs` and skipped by `wait()`.
+ * - `providersRoundRobinCounter` is a monotonic counter that drives the
+ *   50/50 normal-mode provider pick. Bumped under the lockfile.
  *
  * `buckets` map keyed by bucket name. Each bucket has a fixed intervalMs
  * and a `nextSlotMs` timestamp (the next slot reserved time).
@@ -13,7 +24,9 @@
  * so a misbehaving fleet-rental loop cannot starve the other bots.
  */
 
-export const STATE_VERSION = 1;
+export const STATE_VERSION = 2;
+
+export type ProviderId = 'main' | 'fallback';
 
 export interface BucketState {
   /** Wall-clock ms of the next reserved slot. */
@@ -32,15 +45,31 @@ export interface ExclusiveState {
   priorityHint: number;
 }
 
-export interface RpcLimiterState {
-  version: 1;
-  enabled: boolean;
-  apiKey: string;
+export interface ProviderState {
+  /** Base RPC URL (no api-key). */
   rpcBaseUrl: string;
+  /** Helius api-key (or empty for providers that don't need it). */
+  apiKey: string;
+  /** Recent failure count; cleared on a successful ('ok') outcome. */
+  failures: number;
+  /** Wall-clock ms until which this provider is in cooldown. `null` = available. */
+  cooldownUntilMs: number | null;
+}
+
+export interface RpcLimiterState {
+  version: 2;
+  enabled: boolean;
+  providers: Record<ProviderId, ProviderState>;
+  /** Round-robin counter for normal-mode provider pick. Bumped under the lock. */
+  providersRoundRobinCounter: number;
   buckets: Record<string, BucketState>;
   limits: {
     maxExclusiveMs: number;
     minNormalMsBetweenExclusives: number;
+    /** How long a provider stays in cooldown after tripping the failure threshold. */
+    cooldownMs: number;
+    /** Non-`ok` outcomes before a provider is put into cooldown. */
+    failureThreshold: number;
   };
   exclusive: ExclusiveState | null;
   lastExclusiveEndedAtMs: number | null;
@@ -48,14 +77,31 @@ export interface RpcLimiterState {
   revision: number;
 }
 
-export const DEFAULT_CONFIG: Omit<RpcLimiterState, 'buckets' | 'exclusive' | 'lastExclusiveEndedAtMs' | 'revision'> = {
+export const DEFAULT_CONFIG: Omit<
+  RpcLimiterState,
+  'buckets' | 'exclusive' | 'lastExclusiveEndedAtMs' | 'revision' | 'providersRoundRobinCounter'
+> = {
   version: STATE_VERSION,
   enabled: true,
-  apiKey: '',
-  rpcBaseUrl: 'https://mainnet.helius-rpc.com',
+  providers: {
+    main: {
+      rpcBaseUrl: 'https://mainnet.helius-rpc.com',
+      apiKey: '',
+      failures: 0,
+      cooldownUntilMs: null,
+    },
+    fallback: {
+      rpcBaseUrl: '',
+      apiKey: '',
+      failures: 0,
+      cooldownUntilMs: null,
+    },
+  },
   limits: {
     maxExclusiveMs: 30_000,
     minNormalMsBetweenExclusives: 5_000,
+    cooldownMs: 60 * 60 * 1000, // 1h
+    failureThreshold: 3,
   },
 };
 

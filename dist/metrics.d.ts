@@ -10,6 +10,7 @@ export interface RpcMetricLabels {
     app?: string;
     profile?: string;
     method?: string;
+    provider?: 'main' | 'fallback';
 }
 export interface RpcMetricSample extends RpcMetricLabels {
     bucket: string;
@@ -21,6 +22,7 @@ export interface RpcMetricCounter {
     profile: string;
     method: string;
     bucket: string;
+    provider: 'main' | 'fallback';
     count: number;
     waitedCount: number;
     totalWaitMs: number;

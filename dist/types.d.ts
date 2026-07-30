@@ -1,5 +1,16 @@
 /**
- * Shared state schema (version 1).
+ * Shared state schema.
+ *
+ * Version 2 (multi-provider):
+ * - Two named providers (`main`, `fallback`) instead of a single top-level
+ *   `apiKey`/`rpcBaseUrl`. v1 state is one-way migrated on read: the old
+ *   values land in `providers.main`; `providers.fallback` starts empty and
+ *   must be configured by the user.
+ * - Each provider tracks recent failures and a cooldown timestamp. After
+ *   `limits.failureThreshold` non-`ok` outcomes, a provider is marked
+ *   `cooldownUntilMs = now + limits.cooldownMs` and skipped by `wait()`.
+ * - `providersRoundRobinCounter` is a monotonic counter that drives the
+ *   50/50 normal-mode provider pick. Bumped under the lockfile.
  *
  * `buckets` map keyed by bucket name. Each bucket has a fixed intervalMs
  * and a `nextSlotMs` timestamp (the next slot reserved time).
@@ -12,7 +23,8 @@
  * window ended. Used to enforce `minNormalMsBetweenExclusives` server-side,
  * so a misbehaving fleet-rental loop cannot starve the other bots.
  */
-export declare const STATE_VERSION = 1;
+export declare const STATE_VERSION = 2;
+export type ProviderId = 'main' | 'fallback';
 export interface BucketState {
     /** Wall-clock ms of the next reserved slot. */
     nextSlotMs: number;
@@ -28,21 +40,36 @@ export interface ExclusiveState {
     /** Tie-break: higher wins. Fleet rental passes rentPerDay. */
     priorityHint: number;
 }
-export interface RpcLimiterState {
-    version: 1;
-    enabled: boolean;
-    apiKey: string;
+export interface ProviderState {
+    /** Base RPC URL (no api-key). */
     rpcBaseUrl: string;
+    /** Helius api-key (or empty for providers that don't need it). */
+    apiKey: string;
+    /** Recent failure count; cleared on a successful ('ok') outcome. */
+    failures: number;
+    /** Wall-clock ms until which this provider is in cooldown. `null` = available. */
+    cooldownUntilMs: number | null;
+}
+export interface RpcLimiterState {
+    version: 2;
+    enabled: boolean;
+    providers: Record<ProviderId, ProviderState>;
+    /** Round-robin counter for normal-mode provider pick. Bumped under the lock. */
+    providersRoundRobinCounter: number;
     buckets: Record<string, BucketState>;
     limits: {
         maxExclusiveMs: number;
         minNormalMsBetweenExclusives: number;
+        /** How long a provider stays in cooldown after tripping the failure threshold. */
+        cooldownMs: number;
+        /** Non-`ok` outcomes before a provider is put into cooldown. */
+        failureThreshold: number;
     };
     exclusive: ExclusiveState | null;
     lastExclusiveEndedAtMs: number | null;
     /** Monotonic counter, useful for debugging and ordering. */
     revision: number;
 }
-export declare const DEFAULT_CONFIG: Omit<RpcLimiterState, 'buckets' | 'exclusive' | 'lastExclusiveEndedAtMs' | 'revision'>;
+export declare const DEFAULT_CONFIG: Omit<RpcLimiterState, 'buckets' | 'exclusive' | 'lastExclusiveEndedAtMs' | 'revision' | 'providersRoundRobinCounter'>;
 export declare const DEFAULT_BUCKET: BucketState;
 //# sourceMappingURL=types.d.ts.map
