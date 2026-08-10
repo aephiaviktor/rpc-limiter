@@ -1,4 +1,5 @@
 import { RpcLimiterState, BucketState } from './types';
+export { isTransientRenameError } from './atomic-write';
 /**
  * Read state.json. If missing or malformed, return a fresh default state.
  * This is intentional: a corrupted file should not crash all 8 bots.

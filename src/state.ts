@@ -1,6 +1,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
+  atomicWriteFileSync,
+  cleanupStaleTempFilesSync,
+  isTransientRenameError,
+  removeTempFile,
+  renameWithRetry,
+  renameWithRetrySync,
+} from './atomic-write';
+import {
   RpcLimiterState,
   STATE_VERSION,
   DEFAULT_CONFIG,
@@ -10,50 +18,7 @@ import {
 
 let writeChain: Promise<unknown> = Promise.resolve();
 
-const WINDOWS_RENAME_RETRY_DELAYS_MS = [20, 50, 100, 200];
-const TRANSIENT_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'ENOTEMPTY']);
-
-export function isTransientRenameError(error: unknown, platform: NodeJS.Platform = process.platform): boolean {
-  if (platform !== 'win32' || !error || typeof error !== 'object' || !('code' in error)) {
-    return false;
-  }
-  return TRANSIENT_RENAME_CODES.has(String((error as NodeJS.ErrnoException).code ?? '').toUpperCase());
-}
-
-function sleepSync(ms: number): void {
-  const buffer = new SharedArrayBuffer(4);
-  Atomics.wait(new Int32Array(buffer), 0, 0, ms);
-}
-
-async function renameWithRetry(tmp: string, stateFile: string): Promise<void> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await fs.promises.rename(tmp, stateFile);
-      return;
-    } catch (error) {
-      const delayMs = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
-      if (!isTransientRenameError(error) || delayMs === undefined) throw error;
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
-  }
-}
-
-function renameWithRetrySync(tmp: string, stateFile: string): void {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      fs.renameSync(tmp, stateFile);
-      return;
-    } catch (error) {
-      const delayMs = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
-      if (!isTransientRenameError(error) || delayMs === undefined) throw error;
-      sleepSync(delayMs);
-    }
-  }
-}
-
-async function removeTempFile(tmp: string): Promise<void> {
-  await fs.promises.unlink(tmp).catch(() => undefined);
-}
+export { isTransientRenameError } from './atomic-write';
 
 /**
  * Read state.json. If missing or malformed, return a fresh default state.
@@ -108,11 +73,11 @@ export function writeState(stateFile: string, state: RpcLimiterState): Promise<v
     const tmp = `${stateFile}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
     const text = JSON.stringify(state, null, 2);
     try {
+      cleanupStaleTempFilesSync(stateFile);
       await fs.promises.writeFile(tmp, text, 'utf8');
       await renameWithRetry(tmp, stateFile);
-    } catch (error) {
+    } finally {
       await removeTempFile(tmp);
-      throw error;
     }
   });
   writeChain = op.catch(() => undefined);
@@ -126,19 +91,9 @@ export function writeState(stateFile: string, state: RpcLimiterState): Promise<v
  * IMPORTANT: caller must hold the lockfile. Otherwise races.
  */
 export function writeStateSync(stateFile: string, state: RpcLimiterState): void {
-  const tmp = `${stateFile}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
   const text = JSON.stringify(state, null, 2);
-  try {
-    fs.writeFileSync(tmp, text, 'utf8');
-    renameWithRetrySync(tmp, stateFile);
-  } catch (error) {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      // best-effort cleanup
-    }
-    throw error;
-  }
+  cleanupStaleTempFilesSync(stateFile);
+  atomicWriteFileSync(stateFile, text);
 }
 
 function freshState(): RpcLimiterState {

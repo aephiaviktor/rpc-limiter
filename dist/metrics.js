@@ -42,10 +42,12 @@ exports.formatMetricsComparison = formatMetricsComparison;
 exports.normalizeRpcMethod = normalizeRpcMethod;
 const fs = __importStar(require("fs"));
 const lockfile = __importStar(require("proper-lockfile"));
+const atomic_write_1 = require("./atomic-write");
 exports.METRICS_VERSION = 1;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
+const METRICS_LOCK_STALE_MS = 60_000;
 exports.DEFAULT_METRICS_RETENTION = {
     minuteMs: 48 * HOUR_MS,
     hourMs: 30 * DAY_MS,
@@ -54,12 +56,17 @@ exports.DEFAULT_METRICS_RETENTION = {
 async function recordRpcMetric(paths, sample, nowMs = Date.now(), lockOptions = {}) {
     ensureFile(paths.metricsLockfile, '');
     const release = await lockfile.lock(paths.metricsLockfile, {
-        stale: 5_000,
-        retries: { retries: 10, minTimeout: 5, maxTimeout: 50, factor: 1.2 },
+        // A full metrics snapshot can be large and is written synchronously. Keep
+        // the lock alive long enough that a slow/full Windows disk cannot make
+        // another process steal it mid-replacement, and wait boundedly for peers.
+        stale: METRICS_LOCK_STALE_MS,
+        update: 10_000,
+        retries: { retries: 120, minTimeout: 10, maxTimeout: 250, factor: 1.2 },
         realpath: false,
         ...lockOptions,
     });
     try {
+        (0, atomic_write_1.cleanupStaleTempFilesSync)(paths.metricsFile);
         const metrics = readMetrics(paths.metricsFile, nowMs);
         addSample(metrics.minutes, minuteKey(nowMs), sample, nowMs);
         addSample(metrics.hours, hourKey(nowMs), sample, nowMs);
@@ -105,9 +112,7 @@ function readMetrics(metricsFile, nowMs = Date.now()) {
     }
 }
 function writeMetricsSync(metricsFile, metrics) {
-    const tmp = `${metricsFile}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
-    fs.writeFileSync(tmp, JSON.stringify(metrics, null, 2), 'utf8');
-    fs.renameSync(tmp, metricsFile);
+    (0, atomic_write_1.atomicWriteFileSync)(metricsFile, JSON.stringify(metrics, null, 2));
 }
 function buildMetricsComparison(metrics, nowMs = Date.now(), limit = 20) {
     const last24hStart = nowMs - DAY_MS;

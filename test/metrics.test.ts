@@ -68,4 +68,28 @@ describe('RPC metrics', () => {
       fs.rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it('serializes simultaneous shared metrics writers without corruption or temp leaks', async () => {
+    const home = freshHome();
+    const paths = resolvePaths(home);
+    const now = Date.parse('2026-08-10T05:00:00.000Z');
+
+    try {
+      await Promise.all(Array.from({ length: 25 }, (_, index) => recordRpcMetric(paths, {
+        app: 'contention-test',
+        profile: `writer-${index % 5}`,
+        method: 'getAccountInfo',
+        bucket: 'rpc:shared',
+      }, now + index)));
+
+      const metrics = readMetrics(paths.metricsFile, now + 25);
+      const minute = Object.values(metrics.minutes)[0] ?? {};
+      const total = Object.values(minute).reduce((sum, counter) => sum + counter.count, 0);
+      expect(total).toBe(25);
+      expect(() => JSON.parse(fs.readFileSync(paths.metricsFile, 'utf8'))).not.toThrow();
+      expect(fs.readdirSync(home).filter((name) => name.startsWith('metrics.json.tmp.'))).toEqual([]);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
 });

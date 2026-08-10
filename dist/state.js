@@ -33,14 +33,18 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.isTransientRenameError = void 0;
 exports.readState = readState;
 exports.writeState = writeState;
 exports.writeStateSync = writeStateSync;
 exports.ensureBucket = ensureBucket;
 exports.bumpRevision = bumpRevision;
 const fs = __importStar(require("fs"));
+const atomic_write_1 = require("./atomic-write");
 const types_1 = require("./types");
 let writeChain = Promise.resolve();
+var atomic_write_2 = require("./atomic-write");
+Object.defineProperty(exports, "isTransientRenameError", { enumerable: true, get: function () { return atomic_write_2.isTransientRenameError; } });
 /**
  * Read state.json. If missing or malformed, return a fresh default state.
  * This is intentional: a corrupted file should not crash all 8 bots.
@@ -93,8 +97,14 @@ function writeState(stateFile, state) {
     const op = writeChain.then(async () => {
         const tmp = `${stateFile}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
         const text = JSON.stringify(state, null, 2);
-        await fs.promises.writeFile(tmp, text, 'utf8');
-        await fs.promises.rename(tmp, stateFile);
+        try {
+            (0, atomic_write_1.cleanupStaleTempFilesSync)(stateFile);
+            await fs.promises.writeFile(tmp, text, 'utf8');
+            await (0, atomic_write_1.renameWithRetry)(tmp, stateFile);
+        }
+        finally {
+            await (0, atomic_write_1.removeTempFile)(tmp);
+        }
     });
     writeChain = op.catch(() => undefined);
     return op;
@@ -106,10 +116,9 @@ function writeState(stateFile, state) {
  * IMPORTANT: caller must hold the lockfile. Otherwise races.
  */
 function writeStateSync(stateFile, state) {
-    const tmp = `${stateFile}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
     const text = JSON.stringify(state, null, 2);
-    fs.writeFileSync(tmp, text, 'utf8');
-    fs.renameSync(tmp, stateFile);
+    (0, atomic_write_1.cleanupStaleTempFilesSync)(stateFile);
+    (0, atomic_write_1.atomicWriteFileSync)(stateFile, text);
 }
 function freshState() {
     return {

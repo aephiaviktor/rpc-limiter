@@ -1,12 +1,17 @@
 import * as fs from 'fs';
 import * as lockfile from 'proper-lockfile';
 import { RpcLimiterPaths } from './paths';
+import {
+  atomicWriteFileSync,
+  cleanupStaleTempFilesSync,
+} from './atomic-write';
 
 export const METRICS_VERSION = 1;
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
+const METRICS_LOCK_STALE_MS = 60_000;
 
 export const DEFAULT_METRICS_RETENTION = {
   minuteMs: 48 * HOUR_MS,
@@ -85,13 +90,18 @@ export async function recordRpcMetric(
 ): Promise<void> {
   ensureFile(paths.metricsLockfile, '');
   const release = await lockfile.lock(paths.metricsLockfile, {
-    stale: 5_000,
-    retries: { retries: 10, minTimeout: 5, maxTimeout: 50, factor: 1.2 },
+    // A full metrics snapshot can be large and is written synchronously. Keep
+    // the lock alive long enough that a slow/full Windows disk cannot make
+    // another process steal it mid-replacement, and wait boundedly for peers.
+    stale: METRICS_LOCK_STALE_MS,
+    update: 10_000,
+    retries: { retries: 120, minTimeout: 10, maxTimeout: 250, factor: 1.2 },
     realpath: false,
     ...lockOptions,
   });
 
   try {
+    cleanupStaleTempFilesSync(paths.metricsFile);
     const metrics = readMetrics(paths.metricsFile, nowMs);
     addSample(metrics.minutes, minuteKey(nowMs), sample, nowMs);
     addSample(metrics.hours, hourKey(nowMs), sample, nowMs);
@@ -137,9 +147,7 @@ export function readMetrics(metricsFile: string, nowMs: number = Date.now()): Rp
 }
 
 export function writeMetricsSync(metricsFile: string, metrics: RpcMetricsState): void {
-  const tmp = `${metricsFile}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
-  fs.writeFileSync(tmp, JSON.stringify(metrics, null, 2), 'utf8');
-  fs.renameSync(tmp, metricsFile);
+  atomicWriteFileSync(metricsFile, JSON.stringify(metrics, null, 2));
 }
 
 export function buildMetricsComparison(
