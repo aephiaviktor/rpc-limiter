@@ -33,6 +33,6 @@
     "@types/proper-lockfile": "^4.1.4",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.2",
-    "vitest": "^2.1.8"
+    "vitest": "^4.1.0"
   }
 }
